@@ -1,0 +1,9 @@
+setoolkit https://github.com/trustedsec/social-engineer-toolkit
+metasploit https://github.com/rapid7/metasploit-framework
+wpscan https://github.com/wpscanteam/wpscan
+patator https://github.com/lanjelot/patator
+nuclei https://github.com/projectdiscovery/nuclei
+nikto https://github.com/sullo/nikto
+hydra https://github.com/vanhauser-thc/thc-hydra
+hashcat https://github.com/hashcat/hashcat
+

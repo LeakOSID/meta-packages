@@ -1,0 +1,267 @@
+#!/bin/bash
+
+# --- Konfigurasi Direktori ---
+LFS_PACKAGES_DIR="/usr/share/leakos/packages"
+LFS_BUILD_DIR="/usr/share/leakos/build"
+LFS_LOG_DIR="/var/log/leakos/packages"
+PACKAGE_LIST_URL="https://raw.githubusercontent.com/LeakOSID/meta-packages/main/packages.txt"
+
+# --- Warna Terminal ---
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# --- Fungsi Banner ---
+show_banner() {
+    clear
+    local random_num=$((RANDOM % 2))
+    
+    if [ $random_num -eq 0 ]; then
+        echo -e "${CYAN}"
+        echo "       .---.        .-----------. "
+        echo "      /     \      /  Leak OS  /  "
+        echo "     |  (O)  |    /  Package  /   "
+        echo "      \     /    /  Manager  /    "
+        echo "       '---'    '-----------'     "
+        echo -e "${NC}"
+    else
+        echo -e "${BLUE}"
+        echo "  +[ Leakos Package Manager (LPM) ]"
+        echo "  +[ Version : 2.0-STABLE         ]"
+        echo "  +[ Codename: Silent Whisper     ]"
+        echo -e "${NC}"
+    fi
+
+    echo -e "${YELLOW}  =[ leakos.org | @LeakOSID                ]="
+    echo -e "  =[ v2.0-dev                              ]${NC}"
+    echo ""
+}
+
+# Inisialisasi Direktori
+mkdir -p "$LFS_BUILD_DIR"
+mkdir -p "$LFS_LOG_DIR"
+
+if [[ $EUID -ne 0 ]]; then
+    show_banner
+    echo -e "${RED}Error: Skrip ini harus dijalankan sebagai root (sudo).${NC}"
+    exit 1
+fi
+
+# --- Fungsi Pendukung ---
+
+get_package_url() {
+    local package_name=$1
+    local url
+    url=$(curl -s "$PACKAGE_LIST_URL" | grep -E "^${package_name} " | cut -d ' ' -f 2)
+    if [[ -z "$url" ]]; then
+        echo -e "${RED}[-] Error: Paket '$package_name' tidak ditemukan.${NC}"
+        return 1
+    fi
+    echo "$url"
+}
+
+extract_package() {
+    local package_file=$1
+    case "$package_file" in
+        *.tar.gz)  tar -xzf "$package_file" ;;
+        *.tar.xz)  tar -xJf "$package_file" ;;
+        *.tar.bz2) tar -xjf "$package_file" ;;
+        *) echo "Format arsip tidak didukung."; return 1 ;;
+    esac
+}
+
+# --- Fungsi Utama ---
+
+install_package() {
+    local package_name=$1
+    local package_url
+    package_url=$(get_package_url "$package_name") || return 1
+
+    local package_dir="${LFS_BUILD_DIR}/${package_name}"
+    local log_file="${LFS_LOG_DIR}/${package_name}.log"
+
+    cd "$LFS_BUILD_DIR" || exit
+
+    # --- LOGIKA DOWNLOAD / UPDATE ---
+    if [[ -d "$package_dir" ]]; then
+        echo -e "${YELLOW}[!] Direktori $package_name sudah ada.${NC}"
+        cd "$package_dir" || exit
+        if [[ -d ".git" ]]; then
+            echo -e "${BLUE}[*] Menarik pembaruan dari GitHub (git pull)...${NC}"
+            git pull
+        else
+            echo -e "${YELLOW}[!] Folder bukan repositori git, menggunakan file yang ada.${NC}"
+        fi
+    else
+        echo -e "${BLUE}[*] Mengunduh: $package_name...${NC}"
+        if [[ "$package_url" == *.tar.* ]]; then
+            wget -q "$package_url" -O "$package_name.archive"
+            extract_package "$package_name.archive"
+            # Coba masuk ke folder hasil ekstrak
+            local extracted_dir=$(ls -d */ | grep -i "$package_name" | head -n 1)
+            if [[ -n "$extracted_dir" ]]; then
+                cd "$extracted_dir" || exit
+            fi
+        else
+            git clone --depth 1 "$package_url" "$package_name"
+            cd "$package_name" || exit
+        fi
+    fi
+
+    echo -e "${BLUE}[*] Mendeteksi sistem build...${NC}"
+    # Mencari file .pl atau binary tanpa ekstensi yang bisa dijalankan
+    local script_file=$(find . -maxdepth 3 -type f \( -name "${package_name}.pl" -o -name "${package_name}" \) -executable | head -n 1)
+
+    if [[ -n "$script_file" && ! -f "Makefile" && ! -f "meson.build" && ! -f "CMakeLists.txt" ]]; then
+        echo -e "${YELLOW}[!] Manual Script detected (e.g. Nikto).${NC}"
+        chmod +x "$script_file"
+        ln -sf "$(pwd)/${script_file#./}" "/usr/bin/${package_name}"
+        echo "/usr/bin/${package_name}" > "$log_file"
+        echo -e "${GREEN}[+] Symlink created: /usr/bin/${package_name}${NC}"
+
+    # --- ALUR DETEKSI BUILD SYSTEM (IF/ELIF Tunggal) ---
+    # 3. Perl (Makefile.PL)
+    elif [[ -f "Makefile.PL" ]]; then
+        perl Makefile.PL INSTALLDIRS=vendor && make && make install | tee "$log_file"
+
+    elif [[ -f "meson.build" ]]; then
+        echo -e "${YELLOW}[!] Meson detected.${NC}"
+        # Jika folder build sudah ada, hapus dulu agar setup ulang bersih
+        rm -rf build 
+        meson setup build --prefix=/usr && ninja -j$(nproc) -C build && ninja -C build install | tee "$log_file"
+
+    elif [[ -f "configure" ]]; then
+        echo -e "${YELLOW}[!] Autotools detected.${NC}"
+        ./configure --prefix=/usr && make -j$(nproc) && make install | tee "$log_file"
+
+    elif [[ -f "CMakeLists.txt" ]]; then
+        echo -e "${YELLOW}[!] CMake detected.${NC}"
+        rm -rf build && mkdir build && cd build
+        cmake -DCMAKE_INSTALL_PREFIX=/usr .. && make -j$(nproc) && make install | tee "$log_file"
+
+    elif [[ -f "setup.py" || -f "pyproject.toml" ]]; then
+        echo -e "${YELLOW}[!] Python detected.${NC}"
+        pip3 install . --break-system-packages || pip3 install .
+        touch "$log_file"
+
+    elif [[ -f "Gemfile" || -f "*.gemspec" || -f "Rakefile" ]]; then
+        echo -e "${YELLOW}[!] Ruby project detected.${NC}"
+        
+        # 1. Install dependensi via Bundler jika ada Gemfile
+        if [[ -f "Gemfile" ]]; then
+            echo -e "${BLUE}[*] Running bundle install...${NC}"
+            bundle install | tee "$log_file"
+        fi
+
+        # 2. Jika ada file .gemspec, bangun dan instal gem secara sistem
+        local gemspec=$(ls *.gemspec 2>/dev/null | head -n 1)
+        if [[ -n "$gemspec" ]]; then
+            echo -e "${BLUE}[*] Building and installing Ruby Gem...${NC}"
+            gem build "$gemspec"
+            # Install file .gem yang baru dibuat
+            gem install ./*.gem --no-document | tee -a "$log_file"
+        
+        # 3. Jika hanya ada Rakefile
+        elif [[ -f "Rakefile" ]]; then
+            echo -e "${BLUE}[*] Running rake install...${NC}"
+            rake install | tee -a "$log_file" || rake | tee -a "$log_file"
+        fi
+    elif [[ -f "go.mod" ]]; then
+        echo -e "${YELLOW}[!] Go detected.${NC}"
+        go build -o "$package_name" && cp -v "$package_name" /usr/bin/ | tee "$log_file"
+
+    elif [[ -f "package.json" ]]; then
+        echo -e "${YELLOW}[!] Node.js detected.${NC}"
+        npm install -g | tee "$log_file"
+
+    elif [[ -f "Cargo.toml" ]]; then
+        echo -e "${YELLOW}[!] Rust detected.${NC}"
+        cargo install --path . --root /usr | tee "$log_file"
+
+    elif [[ -f "Makefile" ]]; then
+        echo -e "${YELLOW}[!] Makefile detected.${NC}"
+        make clean 2>/dev/null # Opsional: bersihkan build lama
+        make -j$(nproc) && make install | tee "$log_file"
+
+    else
+        echo -e "${RED}[-] Gagal: Sistem build tidak dikenali.${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}[+] Berhasil: $package_name telah terpasang/diperbarui.${NC}"
+}
+
+uninstall_package() {
+    local package_name=$1
+    local log_file="${LFS_LOG_DIR}/${package_name}.log"
+    local package_dir="${LFS_BUILD_DIR}/${package_name}"
+
+    echo -e "${YELLOW}[*] Menghapus paket: $package_name...${NC}"
+
+    # 1. Log-based cleanup (Menghapus file yang terinstall ke sistem)
+    if [[ -f "$log_file" ]]; then
+        echo -e "${BLUE}[*] Membersihkan file sistem...${NC}"
+        while IFS= read -r line; do
+            local path=$(echo "$line" | grep -oP "(/usr|/etc|/bin|/sbin|/lib|/var)[^' ]+")
+            [[ -n "$path" && -e "$path" ]] && rm -rv "$path"
+        done < "$log_file"
+        rm "$log_file"
+    fi
+    # 2. Package manager cleanups
+    gem list -i "$package_name" &>/dev/null && gem uninstall "$package_name" -a -x --force
+    pip3 uninstall -y "$package_name" --break-system-packages &>/dev/null
+    
+    # 3. Binary cleanup (symlink/manual)
+    [[ -L "/usr/bin/$package_name" || -f "/usr/bin/$package_name" ]] && rm -v "/usr/bin/$package_name"
+
+    # 4. HAPUS FOLDER SOURCE (Build Directory)
+    if [[ -d "$package_dir" ]]; then
+        echo -e "${BLUE}[*] Menghapus folder sumber di $package_dir...${NC}"
+        rm -rf "$package_dir"
+    fi
+
+    echo -e "${GREEN}[+] $package_name berhasil dihapus total.${NC}"
+}
+
+list_installed() {
+    echo -e "${BLUE}Daftar paket LeakOS terinstal:${NC}"
+    echo "------------------------------------"
+    ls "$LFS_LOG_DIR" | sed 's/\.log//'
+    echo "------------------------------------"
+}
+
+usage() {
+    echo "Usage: $0 {install|uninstall|list}"
+    echo "  install <name>   - Install/Update packages"
+    echo "  uninstall <name> - Cleanly remove the package"
+    echo "  list             - View installed packages"
+}
+
+# --- Eksekusi ---
+show_banner
+
+case "$1" in
+    install)
+        [[ -z "$2" ]] && usage && exit 1
+        install_package "$2"
+        ;;
+    uninstall)
+        shift
+        if [[ -z "$1" ]]; then
+            echo -e "${RED}Error: Masukkan nama paket yang ingin dihapus.${NC}"
+            exit 1
+        fi
+        for pkg in "$@"; do
+            uninstall_package "$pkg"
+        done
+        ;;
+    list)
+        list_installed
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
