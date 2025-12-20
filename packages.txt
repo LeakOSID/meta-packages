@@ -6,4 +6,4 @@ nuclei https://github.com/projectdiscovery/nuclei
 nikto https://github.com/sullo/nikto
 hydra https://github.com/vanhauser-thc/thc-hydra
 hashcat https://github.com/hashcat/hashcat
-
+bully https://github.com/aanarchyy/bully
