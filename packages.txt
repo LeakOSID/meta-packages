@@ -7,3 +7,4 @@ nikto https://github.com/sullo/nikto
 hydra https://github.com/vanhauser-thc/thc-hydra
 hashcat https://github.com/hashcat/hashcat
 bully https://github.com/aanarchyy/bully
+ffuf        https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_arm64.tar.gz
